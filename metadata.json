@@ -1,0 +1,10 @@
+{
+  "name": "DocScanner - Multi-Image to PDF Scanner",
+  "description": "A CamScanner-like web application to capture, crop, rotate, reorder document photos, and convert them into customized PDF documents with preview, print, and download support.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
