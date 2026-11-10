@@ -255,7 +255,7 @@
           <label class="text-xs font-semibold text-slate-600"
             >អាចប្ដូឈ្មោះ File បាន:</label
           >
-          <el-input v-model="pdfFileName" placeholder="My_Scanned_Document">
+          <el-input v-model="pdfFileName" placeholder="">
             <template #append>.pdf</template>
           </el-input>
         </div>
@@ -400,7 +400,7 @@ const showFlashEffect = ref(false);
 const isGeneratingPdf = ref(false);
 const showTelegramModal = ref(false);
 const generatedPdfBlob = ref(null);
-const pdfFileName = ref("My_Scanned_Document");
+const pdfFileName = ref("");
 
 const showBotConfig = ref(false);
 const telegramBotToken = ref("");
@@ -501,7 +501,6 @@ function takePhoto() {
   const videoH = video.videoHeight || 720;
 
   // --- Figure out where the video is actually painted inside the element ---
-  // (because object-contain preserves aspect ratio and centers the video)
   const elementRect = video.getBoundingClientRect();
   const elementAspect = elementRect.width / elementRect.height;
   const videoAspect = videoW / videoH;
@@ -509,13 +508,11 @@ function takePhoto() {
   let paintedW, paintedH, paintedX, paintedY;
 
   if (videoAspect > elementAspect) {
-    // Video is wider → letterboxed on top/bottom
     paintedW = elementRect.width;
     paintedH = elementRect.width / videoAspect;
     paintedX = 0;
     paintedY = (elementRect.height - paintedH) / 2;
   } else {
-    // Video is taller → pillarboxed on left/right
     paintedH = elementRect.height;
     paintedW = elementRect.height * videoAspect;
     paintedX = (elementRect.width - paintedW) / 2;
@@ -527,13 +524,9 @@ function takePhoto() {
 
   if (overlay) {
     const overlayRect = overlay.getBoundingClientRect();
-
-    // Overlay position relative to the video element (in CSS pixels)
     const relX = overlayRect.left - elementRect.left;
     const relY = overlayRect.top - elementRect.top;
 
-    // Convert from element-CSS-pixels → video-pixels
-    // (subtract letterbox offset, then scale by video-native / painted size)
     const scaleX = videoW / paintedW;
     const scaleY = videoH / paintedH;
 
@@ -542,31 +535,40 @@ function takePhoto() {
     srcW = overlayRect.width * scaleX;
     srcH = overlayRect.height * scaleY;
 
-    // Clamp to video bounds (safety)
     srcX = Math.max(0, Math.min(srcX, videoW));
     srcY = Math.max(0, Math.min(srcY, videoH));
     srcW = Math.min(srcW, videoW - srcX);
     srcH = Math.min(srcH, videoH - srcY);
   } else {
-    // Fallback: capture the whole frame
     srcX = 0;
     srcY = 0;
     srcW = videoW;
     srcH = videoH;
   }
 
-  // --- Draw only that cropped region to the canvas ---
-  canvas.width = Math.round(srcW);
-  canvas.height = Math.round(srcH);
+  // --- Draw the cropped region to an intermediate canvas at native resolution ---
+  const intermediate = document.createElement("canvas");
+  intermediate.width = Math.round(srcW);
+  intermediate.height = Math.round(srcH);
 
-  const ctx = canvas.getContext("2d");
+  const ctx = intermediate.getContext("2d", { willReadFrequently: true });
+
+  // Maximize image quality when drawing
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
   ctx.drawImage(
     video,
-    srcX, srcY, srcW, srcH,       // source region (from video)
-    0, 0, canvas.width, canvas.height, // destination (full canvas)
+    srcX, srcY, srcW, srcH,
+    0, 0, intermediate.width, intermediate.height,
   );
 
-  const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+  // --- Apply enhancement: desaturation (saturation = 0) + sharpening ---
+  const enhancedCanvas = enhanceImage(intermediate);
+
+  // --- Export at maximum quality (PNG = lossless, or JPEG at 1.0) ---
+  // Use PNG for maximum clarity (no compression artifacts)
+  const dataUrl = enhancedCanvas.toDataURL("image/png");
 
   photos.value.push({
     id: "photo_" + Date.now(),
@@ -582,6 +584,103 @@ function takePhoto() {
     message: `ជោគជ័យ ${photos.value.length}!`,
     duration: 1500,
   });
+}
+
+function enhanceImage(sourceCanvas) {
+  const width = sourceCanvas.width;
+  const height = sourceCanvas.height;
+
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = width;
+  outCanvas.height = height;
+
+  const outCtx = outCanvas.getContext("2d", { willReadFrequently: true });
+  outCtx.imageSmoothingEnabled = true;
+  outCtx.imageSmoothingQuality = "high";
+
+  // Draw original onto output canvas first
+  outCtx.drawImage(sourceCanvas, 0, 0);
+
+  // Get pixel data
+  const imageData = outCtx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+
+  // --------------------------------------------------------------------
+  // STEP 1: Desaturate (saturation = 0) — convert to grayscale
+  // Using luminance formula: 0.299*R + 0.587*G + 0.114*B
+  // --------------------------------------------------------------------
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+
+    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+
+    data[i] = gray;
+    data[i + 1] = gray;
+    data[i + 2] = gray;
+    // alpha (data[i + 3]) stays unchanged
+  }
+
+  // --------------------------------------------------------------------
+  // STEP 2: Slight contrast boost to make text pop (optional but helps clarity)
+  // contrast factor: 1.0 = no change, >1 = more contrast
+  // --------------------------------------------------------------------
+  const contrast = 1.15;
+  const intercept = 128 * (1 - contrast);
+
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = Math.min(255, Math.max(0, data[i] * contrast + intercept));
+    data[i + 1] = Math.min(255, Math.max(0, data[i + 1] * contrast + intercept));
+    data[i + 2] = Math.min(255, Math.max(0, data[i + 2] * contrast + intercept));
+  }
+
+  // --------------------------------------------------------------------
+  // STEP 3: Unsharp-mask sharpening (convolution kernel)
+  // This makes edges (text) crisper for a "clear" look.
+  // --------------------------------------------------------------------
+  const sharpenedData = new Uint8ClampedArray(data); // copy
+  const kernel = [
+     0, -1,  0,
+    -1,  5, -1,
+     0, -1,  0,
+  ];
+  const kSize = 3;
+  const half = Math.floor(kSize / 2);
+  const strength = 0.6; // 0 = no sharpen, 1 = full sharpen
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = (y * width + x) * 4;
+
+      let sumR = 0, sumG = 0, sumB = 0;
+
+      for (let ky = 0; ky < kSize; ky++) {
+        for (let kx = 0; kx < kSize; kx++) {
+          const px = x + kx - half;
+          const py = y + ky - half;
+          const pIdx = (py * width + px) * 4;
+          const weight = kernel[ky * kSize + kx];
+
+          sumR += data[pIdx] * weight;
+          sumG += data[pIdx + 1] * weight;
+          sumB += data[pIdx + 2] * weight;
+        }
+      }
+
+      // Blend between original and sharpened for controlled effect
+      sharpenedData[idx]     = data[idx]     + (sumR - data[idx])     * strength;
+      sharpenedData[idx + 1] = data[idx + 1] + (sumG - data[idx + 1]) * strength;
+      sharpenedData[idx + 2] = data[idx + 2] + (sumB - data[idx + 2]) * strength;
+      sharpenedData[idx + 3] = data[idx + 3];
+    }
+  }
+
+  // Write sharpened pixels back
+  const finalImageData = new ImageData(sharpenedData, width, height);
+  outCtx.putImageData(finalImageData, 0, 0);
+
+  return outCanvas;
 }
 
 function removePhoto(index) {
@@ -817,7 +916,7 @@ async function applyCrop() {
   const ctx = offscreen.getContext("2d");
   ctx.drawImage(img, sx, sy, sw, sh, 0, 0, offscreen.width, offscreen.height);
 
-  const croppedDataUrl = offscreen.toDataURL("image/jpeg", 0.92);
+ const croppedDataUrl = offscreen.toDataURL("image/png");
 
   // Replace the photo entry in-place
   const index = cropPhotoIndex.value;
@@ -900,7 +999,7 @@ async function convertPhotosToPdf() {
 
       doc.addImage(
         photoItem.dataUrl,
-        "JPEG",
+        "PNG",
         posX,
         posY,
         renderWidth,
@@ -925,7 +1024,7 @@ async function convertPhotosToPdfAndOpenShare() {
   const blob = await convertPhotosToPdf();
   if (blob) {
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-    pdfFileName.value = `Scanned_Doc_${dateStr}_${photos.value.length}p`;
+    pdfFileName.value = ``;
     showTelegramModal.value = true;
   }
 }
